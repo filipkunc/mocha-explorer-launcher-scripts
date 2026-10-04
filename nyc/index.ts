@@ -1,54 +1,41 @@
 import * as path from 'path';
 import { fork, spawn } from 'child_process';
-import { receiveConnection, createConnection, writeMessage, readMessages } from 'vscode-test-adapter-remoting-util';
-import { WorkerArgs } from 'vscode-test-adapter-remoting-util/out/mocha';
+import { secureTransport, port, supervise, bridge, forward, fail } from '../shared/security';
 
-process.once('message', async (workerArgs: WorkerArgs) => {
-
-	process.chdir(workerArgs.cwd);
-
-	// we only use nyc for running the tests, but not for loading or debugging them
-	if ((workerArgs.action === 'runTests') && !workerArgs.debuggerPort) {
-
-		// IPC options for the communication between this launcher script and the worker script
-		const ipcOpts = {
-			role: 'client',
-			port: parseInt(process.env['NYC_PORT'] || '8123'),
-			host: 'localhost'
-		};
-
-		const nycPath = path.resolve(workerArgs.cwd, process.env['NYC_PATH'] || "node_modules/.bin/nyc");
-		const nycReporter = process.env['NYC_REPORTER'] || 'lcov';
-
-		spawn(
-			nycPath,
-			[
-				`--reporter=${nycReporter}`,
-				process.execPath,
-				workerArgs.workerScript!,
-				JSON.stringify(ipcOpts)
-			],
-			// setting stdio to 'inherit' ensures that any messages that the tests
-			// write to stdout/stderr will reach Mocha Test Explorer
-			{ stdio: 'inherit' }
-		);
-
-		const socket = await receiveConnection(ipcOpts.port);
-
-		// forward the request to the worker script
-		writeMessage(socket, workerArgs);
-		// forward the results from the worker script
-		readMessages(socket, msg => process.send!(msg));
-
-	} else {
-
-		const execArgv = workerArgs.debuggerPort ? [ `--inspect-brk=${workerArgs.debuggerPort}` ] : [];
-
-		const childProc = fork(workerArgs.workerScript!, [], { execArgv, stdio: 'inherit' });
-
-		// forward the request to the worker script
-		childProc.send(workerArgs);
-		// forward the results from the worker script
-		childProc.on('message', msg => process.send!(msg));
-	}
+process.once('message', async (args: any) => {
+	let child;
+	let stop: (() => Promise<void>) | undefined;
+	try {
+		const { transport, key } = secureTransport();
+		process.chdir(args.cwd);
+		if (args.action === 'runTests' && !args.debuggerPort) {
+			const workerPort = port(process.env.NYC_PORT);
+			const connection = transport.receiveSecureConnection(workerPort, { host: '127.0.0.1', key });
+			// Attach rejection handling before starting the process.
+			connection.catch(() => {});
+			const coveragePath = process.env.NYC_PATH
+				? path.resolve(args.cwd, process.env.NYC_PATH)
+				: require.resolve('nyc/bin/nyc.js', { paths: [args.cwd] });
+			const nodeScript = path.extname(coveragePath) === '.js';
+			child = spawn(nodeScript ? process.execPath : coveragePath, [
+				...(nodeScript ? [coveragePath] : []),
+				`--reporter=${process.env.NYC_REPORTER || 'lcov'}`, process.execPath, args.workerScript,
+				JSON.stringify({ role: 'client', port: workerPort, host: '127.0.0.1' })
+			], { stdio: 'inherit', detached: process.platform !== 'win32' });
+			stop = supervise(child, true);
+			await bridge(await connection, args, transport, child, stop);
+		} else {
+			child = fork(args.workerScript, [], {
+				execArgv: args.debuggerPort ? [`--inspect-brk=127.0.0.1:${port(String(args.debuggerPort))}`] : [],
+				detached: process.platform !== 'win32',
+				stdio: ['ignore', 'inherit', 'inherit', 'ipc']
+			});
+			stop = supervise(child, true);
+			let pending = 0; let ended = false;
+			const finish = () => { if (ended && !pending && process.connected) process.disconnect(); };
+			child.on('message', message => { pending++; forward(message, () => { pending--; finish(); }); });
+			child.once('close', () => { ended = true; finish(); });
+			child.send(args);
+		}
+	} catch { if (stop) await stop(); else child?.kill(); fail(); }
 });
