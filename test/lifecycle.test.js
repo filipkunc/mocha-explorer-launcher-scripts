@@ -39,7 +39,7 @@ describe('cancel', () => it('waits', done => { setInterval(()=>{},1000); }));`);
     NYC_PATH: path.resolve(__dirname, '../node_modules/nyc/bin/nyc.js') }
   });
   let output = ''; launcher.stderr.on('data', data => output += data); launcher.stdout.resume();
-  const exited = new Promise(resolve => launcher.once('exit', resolve));
+  const exited = new Promise(resolve => launcher.once('exit', (code, signal) => resolve({code, signal})));
   let pids = [];
   try {
    launcher.send({ action, cwd: directory, testFiles: [testFile], tests: ['cancel waits'], env: {},
@@ -51,9 +51,14 @@ describe('cancel', () => it('waits', done => { setInterval(()=>{},1000); }));`);
    assert.ok(fs.existsSync(pidFile) && fs.existsSync(readyFile), 'Worker and stubborn grandchild did not start: ' + output);
    pids = JSON.parse(fs.readFileSync(pidFile));
    assert.ok(pids.every(running));
-   if (cancellation === 'signal') launcher.kill(); else launcher.disconnect();
+   if (cancellation === 'signal') {
+    // Exercise the extension's actual cancellation path: taskkill /T on
+    // Windows, where SIGTERM cannot execute a JavaScript cleanup handler.
+    await require(extension + '/out/process.js').terminateWorker(launcher);
+   } else launcher.disconnect();
    const result = await Promise.race([exited, pause(5000).then(() => { throw new Error('Cancellation did not finish: ' + output); })]);
-   assert.equal(result, 1);
+   assert.ok(result.code !== 0, 'Cancellation must not report success');
+   if (process.platform !== 'win32') assert.equal(result.code, 1);
    const stopped = Date.now() + 3000;
    while (pids.some(running) && Date.now() < stopped) await pause(50);
    assert.ok(pids.every(pid => !running(pid)), 'A worker or grandchild survived cancellation');
