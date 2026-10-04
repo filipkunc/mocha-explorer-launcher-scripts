@@ -1,140 +1,40 @@
-import { spawn, execSync } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
 import { readFileSync } from 'fs';
-import { inspect } from 'util';
-import { mochaWorker, convertPath, receiveConnection, writeMessage, readMessages } from 'vscode-test-adapter-remoting-util';
+import { mochaWorker } from 'vscode-test-adapter-remoting-util';
+import { secureTransport, port, mapPath, quote, sshDestination, supervise, bridge, fail } from '../shared/security';
 
-(function() {
-
-// Any string that is sent to Mocha Test Explorer is added to the diagnostic log (if it is enabled)
-const log = (msg: string) => process.send!(msg);
-
-// How to access the remote environment:
-// make sure you can login using `ssh ${remoteUser}@${remoteHost}` without having to enter a password
-const remoteHost = process.env['SSH_HOST'];
-if (!remoteHost) {
-	log('No remote host configured - please set the SSH_HOST environment variable');
-	return;
-}
-const remoteUser = process.env['SSH_USER'];
-const destination = remoteUser ? `${remoteUser}@${remoteHost}` : remoteHost;
-
-// The paths of the local and remote workspaces
-const localWorkspace = process.env['VSCODE_WORKSPACE_PATH'] || process.cwd();;
-const remoteWorkspace = process.env['SSH_WORKSPACE_PATH'];
-if (!remoteWorkspace) {
-	log('No remote workspace path configured - please set the SSH_WORKSPACE_PATH environment variable');
-	return;
-}
-
-// This port will be used for the communication channel between the launcher and worker scripts
-let port: number;
-try {
-	port = +(process.env['SSH_WORKER_PORT'] || 8123);
-} catch {
-	log(`Couldn't parse SSH_WORKER_PORT: "${process.env['SSH_WORKER_PORT']}" is not a number.`);
-	return;
-}
-
-// These functions convert the paths between the local and remote environments
-const localToRemotePath = (path: string) => convertPath(path, localWorkspace, remoteWorkspace);
-const remoteToLocalPath = (path: string) => convertPath(path, remoteWorkspace, localWorkspace);
-
-// Receive the first message of the worker protocol from the Mocha Test Explorer
-process.once('message', async origWorkerArgs => {
-
-	log('Received workerArgs');
-
-	// Convert the paths in the `WorkerArgs` for the remote environment
-	const workerArgs = mochaWorker.convertWorkerArgs(origWorkerArgs, localToRemotePath);
-
-	// If the tests should be run in the debugger, we need to pass extra arguments to node
-	// to enable the debugger and to ssh to tunnel the debugger connection
-	let nodeDebugArgs: string[] = [];
-	let sshDebugArgs: string[] = [];
-	if (workerArgs.debuggerPort) {
-		nodeDebugArgs = [ `--inspect-brk=${workerArgs.debuggerPort}` ]
-		sshDebugArgs = [ '-L', `${workerArgs.debuggerPort}:localhost:${workerArgs.debuggerPort}` ];
-	}
-
-	// Copy the workspace folder to the remote environment using rsync
-	log('Syncing workspace');
-	const rsyncOutput = execSync(`rsync -r ${localWorkspace}/ ${destination}:${remoteWorkspace}`);
-	log(`Output from rsync: ${rsyncOutput.toString()}`);
-
-	// Start a child process that will run the worker script via ssh
-	log('Starting worker via ssh');
-	const childProcess = spawn(
-		'ssh',
-		[
-			destination,
-
-			// Tunnel the TCP connection for the worker protocol
-			'-R', `${port}:localhost:${port}`,
-
-			// Optionally tunnel the TCP connection for the debugger protocol
-			...sshDebugArgs,
-
-			// We want to run node on the remote host
-			'node',
-
-			// Optionally enable the node debugger
-			...nodeDebugArgs,
-
-			// This tells node that it should receive the worker script on `stdin`
-			'-',
-
-			// This tells the worker script to connect to localhost:${port} for the worker protocol
-			JSON.stringify(`{"role":"client","port":${port}}`)
-		],
-
-		// We use 'inherit' to forward the messages on `stdout` and `stderr` from the child process
-		// to this process, so they can be received by Mocha Test Explorer. `stdin` is set to 'pipe'
-		// so we can use it to send the worker script
-		{ stdio: [ 'pipe', 'inherit', 'inherit' ] }
-	);
-
-	// Report error events from the child process to the diagnostic log of Mocha Test Explorer
-	childProcess.on('error', err => log(`Error from ssh: ${inspect(err)}`));
-
-	// Write a log message when the child process exits
-	childProcess.on('exit', (code, signal) => {
-		log(`The ssh process exited with code ${code} and signal ${signal}.`);
-
-		// If the child process should have loaded the tests but exited abnormally,
-		// we send an `ErrorInfo` object so that the error is shown in the Test Explorer UI
-		if ((workerArgs.action === 'loadTests') && (code || signal)) {
-			process.send!({
-				type: 'finished',
-				errorMessage: `The ssh process exited with code ${code} and signal ${signal}.\nThe diagnostic log may contain more information, enable it with the "mochaExplorer.logpanel" or "mochaExplorer.logfile" settings.`
-			});
-		}
-	});
-
-	// Send the worker script to the child process
-	log('Sending worker script');
-	childProcess.stdin.write(
-		readFileSync(origWorkerArgs.workerScript),
-		() => log('Finished sending worker script')
-	);
-	childProcess.stdin.end();
-
-	// Establish the TCP/IP connection to the worker
-	log('Waiting for worker process to connect');
-	const socket = await receiveConnection(port);
-
-	// Forward the `WorkerArgs` that we received earlier from Mocha Test Explorer to the worker
-	log('Sending workerArgs to worker process');
-	await writeMessage(socket, workerArgs);
-
-	log('Finished initialising worker');
-
-	// Receive the results from the worker, translate any paths in them and forward them to Mocha Test Explorer
-	readMessages(socket, (msg: any) => {
-		if (workerArgs.action === 'loadTests') {
-			process.send!(mochaWorker.convertTestLoadMessage(msg, remoteToLocalPath));
-		} else {
-			process.send!(mochaWorker.convertTestRunMessage(msg, remoteToLocalPath));
-		}
-	});
+process.once('message', async (original: any) => {
+	let child;
+	try {
+		const { transport, key } = secureTransport();
+		const destination = sshDestination(process.env.SSH_HOST, process.env.SSH_USER);
+		const local = process.env.VSCODE_WORKSPACE_PATH || process.cwd();
+		const remote = process.env.SSH_WORKSPACE_PATH;
+		if (!remote || !remote.startsWith('/')) throw new Error('An absolute SSH_WORKSPACE_PATH is required');
+		const workerPort = port(process.env.SSH_WORKER_PORT);
+		const convert = (value: string) => mapPath(value, local, remote);
+		const args = mochaWorker.convertWorkerArgs(original, convert);
+		// Bundled Mocha lives outside the workspace and is not copied by rsync.
+		if (args.mochaPath === original.mochaPath) args.mochaPath = process.env.SSH_MOCHA_PATH || remote + '/node_modules/mocha';
+		if (args.mochaOpts.requires) args.mochaOpts.requires = args.mochaOpts.requires.map(convert);
+		const debugPort = args.debuggerPort ? port(String(args.debuggerPort)) : undefined;
+		await promisify(execFile)('rsync', ['-r', '--protect-args', '-e', 'ssh -o BatchMode=yes', '--', local + '/', destination + ':' + remote]);
+		const connection = transport.receiveSecureConnection(workerPort, { host: '127.0.0.1', key });
+		connection.catch(() => {});
+		const command = [process.env.SSH_NODE_PATH || 'node', ...(debugPort ? [`--inspect-brk=127.0.0.1:${debugPort}`] : []), '-',
+			JSON.stringify({ role: 'client', port: workerPort, host: '127.0.0.1' })].map(quote).join(' ');
+		child = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
+			'-R', `127.0.0.1:${workerPort}:127.0.0.1:${workerPort}`,
+			...(debugPort ? ['-L', `127.0.0.1:${debugPort}:127.0.0.1:${debugPort}`] : []), destination, command
+		], { stdio: ['pipe', 'inherit', 'inherit'] });
+		supervise(child);
+		child.stdin!.on('error', fail);
+		// Deliver the secret over the encrypted SSH stdin channel, never argv.
+		child.stdin!.end(`process.env.MOCHA_WORKER_IPC_KEY = ${JSON.stringify(key)};\n` + readFileSync(original.workerScript, 'utf8'));
+		await bridge(await connection, args, transport, child, (message: any) => {
+			const reverse = (value: string) => mapPath(value, remote, local);
+			return args.action === 'loadTests' ? mochaWorker.convertTestLoadMessage(message, reverse) : mochaWorker.convertTestRunMessage(message, reverse);
+		});
+	} catch { child?.kill(); fail(); }
 });
-})();

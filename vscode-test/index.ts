@@ -1,44 +1,30 @@
-import * as util from 'util';
 import { runTests } from '@vscode/test-electron';
+import { secureTransport, port, stringArray, fail } from '../shared/security';
 
-(async function() {
+(async () => {
 	try {
-
-		// The IPC options specify how the worker should connect to Mocha Explorer
-		const ipcOpts = JSON.parse(process.argv[2]);
-
-		// The folder containing the Extension Manifest package.json
-		// Passed to `--extensionDevelopmentPath`
-		const extensionDevelopmentPath = process.env['VSCODE_WORKSPACE_PATH']!;
-
-		// The path to the extension test script
-		// Passed to --extensionTestsPath
-		const extensionTestsPath = require.resolve('./runMochaWorker');
-
-		// The VS Code version to download
-		const version = process.env['VSCODE_VERSION']!;
-
-		// Optional launch arguments to VS Code
-		let launchArgs: string[] | undefined;
-		if (process.env['VSCODE_LAUNCH_ARGS']) {
-			launchArgs = JSON.parse(process.env['VSCODE_LAUNCH_ARGS']);
+		const { key } = secureTransport();
+		const options = JSON.parse(process.argv[2]);
+		if (options.role !== 'client' && options.role !== 'server') throw new Error('Invalid IPC role');
+		const workerPort = port(String(options.port));
+		const workspace = process.env.VSCODE_WORKSPACE_PATH;
+		const worker = process.env.MOCHA_WORKER_PATH;
+		if (!workspace || !worker) throw new Error('Missing worker paths');
+		const version = process.env.VSCODE_VERSION;
+		if (version && /^\d+\.\d+\.\d+$/.test(version)) {
+			const [major, minor] = version.split('.').map(Number);
+			if (major < 1 || (major === 1 && minor < 102)) throw new Error('VS Code 1.102+ is required');
 		}
-
-		// Download VS Code, unzip it and run the integration test
+		// The launcher may itself run as Electron-as-Node; VS Code must start normally.
+		delete process.env.ELECTRON_RUN_AS_NODE;
 		await runTests({
-			extensionDevelopmentPath,
-			extensionTestsPath,
-			version,
-			launchArgs,
+			extensionDevelopmentPath: workspace, extensionTestsPath: require.resolve('./runMochaWorker'),
+			version, launchArgs: stringArray(process.env.VSCODE_LAUNCH_ARGS),
 			extensionTestsEnv: {
-				MOCHA_WORKER_IPC_ROLE: ipcOpts.role,
-				MOCHA_WORKER_IPC_PORT: String(ipcOpts.port),
-				MOCHA_WORKER_IPC_HOST: ipcOpts.host
+				MOCHA_WORKER_IPC_ROLE: options.role, MOCHA_WORKER_IPC_PORT: String(workerPort),
+				MOCHA_WORKER_IPC_HOST: options.host || '127.0.0.1', MOCHA_WORKER_IPC_KEY: key,
+				MOCHA_WORKER_PATH: worker
 			}
 		});
-
-	} catch (err) {
-		console.error(`Failed to run tests: ${util.inspect(err)}`);
-		process.exit(1);
-	}
+	} catch { fail(); }
 })();

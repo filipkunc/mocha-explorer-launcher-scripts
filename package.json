@@ -1,19 +1,21 @@
 {
   "name": "mocha-explorer-launcher-scripts",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Launcher scripts for the Mocha Explorer extension for VS Code",
   "author": "Holger Benl <hbenl@evandor.de>",
   "license": "MIT",
   "homepage": "https://github.com/hbenl/mocha-explorer-launcher-scripts",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hbenl/mocha-explorer-launcher-scripts.git"
+    "url": "https://github.com/filipkunc/mocha-explorer-launcher-scripts.git"
   },
   "bugs": {
     "url": "https://github.com/hbenl/mocha-explorer-launcher-scripts/issues"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "npm run build && node --test test/*.test.js",
+    "prepack": "npm run build"
   },
   "files": [
     "docker/*",
@@ -21,14 +23,19 @@
     "ssh/*",
     "vscode-test/*",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "shared/*.js"
   ],
   "dependencies": {
+    "@vscode/test-electron": "^3.1.0",
     "vscode-test-adapter-remoting-util": "^0.13.0"
   },
   "devDependencies": {
-    "@types/node": "^10.17.60",
-    "typescript": "~4.5.4",
-    "@vscode/test-electron": "^2.0.1"
+    "@types/node": "^24.19.1",
+    "nyc": "^18.0.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || ^26.0.0"
   }
 }

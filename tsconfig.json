@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
-    "target": "es2015",
-    "lib": [ "es2015" ],
+    "target": "es2022",
+    "lib": [
+      "es2022"
+    ],
     "module": "commonjs",
     "strict": true,
     "skipLibCheck": true,
@@ -11,6 +13,7 @@
     "docker/*.ts",
     "nyc/*.ts",
     "ssh/*.ts",
-    "vscode-test/*.ts"
+    "vscode-test/*.ts",
+    "shared/*.ts"
   ]
 }
