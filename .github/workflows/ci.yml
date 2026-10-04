@@ -1,0 +1,107 @@
+name: CI
+on:
+  push:
+    branches: [master, 'security/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['22.12.0', '24', '26']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: filipkunc/vscode-mocha-test-adapter
+          ref: security/harden-worker-and-config
+          path: .ci-extension
+          persist-credentials: false
+      - run: npm ci
+        working-directory: .ci-extension
+      - run: npm run build
+        working-directory: .ci-extension
+      - run: npm run build
+      - run: npm run test:integration
+        env:
+          MOCHA_EXTENSION_ROOT: ${{ github.workspace }}/.ci-extension
+  audit:
+    name: Dependency audit and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=low
+      - run: npm run build
+      - run: npm pack
+  integration:
+    name: Container and launcher integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: filipkunc/vscode-mocha-test-adapter
+          ref: security/harden-worker-and-config
+          path: .ci-extension
+          persist-credentials: false
+      - run: npm ci
+        working-directory: .ci-extension
+      - run: npm run build
+        working-directory: .ci-extension
+      - run: docker pull docker.io/library/node:24-slim
+      - run: npm run test:integration
+        env:
+          MOCHA_EXTENSION_ROOT: ${{ github.workspace }}/.ci-extension
+          MOCHA_TEST_DOCKER: '1'
+  gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs: [tests, audit, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every prerequisite to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'CHECK'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          failed = [name for name, job in results.items() if job['result'] != 'success']
+          if failed:
+              raise SystemExit('CI prerequisites did not succeed: ' + ', '.join(failed))
+          CHECK

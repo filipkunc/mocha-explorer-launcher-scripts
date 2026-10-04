@@ -23,7 +23,7 @@ async function launch(name, args, env) {
  const messages = []; let output = '';
  child.stdout.on('data', data => output += data); child.stderr.on('data', data => output += data);
  const ended = new Promise((resolve, reject) => {
-  const timeout = setTimeout(() => { child.kill(); reject(new Error('Launcher timed out: ' + output)); }, 60000);
+  const timeout = setTimeout(() => { child.kill(); reject(new Error('Launcher timed out: ' + output)); }, 15000);
   child.once('error', reject);
   child.once('exit', code => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error('Launcher exit ' + code + ': ' + output)); });
  });
@@ -34,11 +34,11 @@ async function launch(name, args, env) {
  return messages;
 }
 for (const name of ['nyc', 'ssh', 'docker']) {
- test(name + ' discovers and runs real tests without leaking the transport key', { skip: !enabled || (name === 'docker' && !process.env.MOCHA_TEST_DOCKER), timeout: 150000 }, async () => {
+ test(name + ' discovers and runs real tests without leaking the transport key', { skip: !enabled || (name === 'ssh' && process.platform === 'win32') || (name === 'docker' && !process.env.MOCHA_TEST_DOCKER), timeout: 150000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "launcher space'"));
   try {
    const testFile = path.join(directory, 'test.js');
-   fs.writeFileSync(testFile, "const assert = require('assert'); describe('secure', () => { it('passes', () => assert.equal(process.env.MOCHA_WORKER_IPC_KEY, undefined)); });");
+   fs.writeFileSync(testFile, "const assert = require('assert'); describe('secure', () => { it('passes', () => assert.equal(process.env.MOCHA_WORKER_IPC_KEY, undefined)); }); setInterval(() => {}, 1000);");
    const args = {
     action: 'loadTests', cwd: directory, testFiles: [testFile], env: {},
     mochaPath: path.join(extension, 'node_modules/mocha'), workerScript: path.join(extension, 'out/worker/bundle.js'),
@@ -47,7 +47,7 @@ for (const name of ['nyc', 'ssh', 'docker']) {
    };
    const port = String(await freePort());
    const env = { VSCODE_WORKSPACE_PATH: directory, NYC_PORT: port, SSH_WORKER_PORT: port, DOCKER_WORKER_PORT: port };
-   if (name === 'nyc') env.NYC_PATH = path.resolve(__dirname, '../node_modules/.bin/nyc');
+   if (name === 'nyc') env.NYC_PATH = path.resolve(__dirname, '../node_modules/nyc/bin/nyc.js');
    if (name === 'docker') { env.DOCKER_IMAGE = 'docker.io/library/node:24-slim'; env.DOCKER_EXTRA_ARGS = '["--security-opt","label=disable"]'; }
    if (name === 'ssh') {
     // Exercise the exact remote shell command and stdin bootstrap locally.
@@ -61,7 +61,7 @@ for (const name of ['nyc', 'ssh', 'docker']) {
    const loaded = await launch(name, args, env);
    const suite = loaded.find(message => message && message.type === 'suite');
    assert.ok(suite, JSON.stringify(loaded));
-   assert.equal(suite.children[0].children[0].file, testFile);
+   assert.equal(fs.realpathSync(suite.children[0].children[0].file), fs.realpathSync(testFile));
    const results = await launch(name, { ...args, action: 'runTests', tests: ['secure passes'] }, env);
    assert.ok(results.some(message => message && message.type === 'test' && message.state === 'passed'), JSON.stringify(results));
    if (name === 'nyc') assert.ok(fs.existsSync(path.join(directory, 'coverage/lcov.info')));

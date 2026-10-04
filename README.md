@@ -65,7 +65,9 @@ npm install --save-dev nyc@^18
 { "mochaExplorer.launcherScript": "node_modules/mocha-explorer-launcher-scripts/nyc" }
 ```
 
-Discovery and debugging use native Node IPC; test runs use an encrypted loopback connection under NYC. `NYC_PATH` selects the NYC executable, `NYC_REPORTER` defaults to `lcov`, and `NYC_PORT` defaults to 8123. The launcher drains worker messages and waits for the coverage process to finish before exiting.
+With `exit` enabled, workers flush their final result and exit normally even if tests leave timers or servers open, allowing NYC to write coverage. Cancellation stops detached process groups on POSIX and uses `taskkill /T` on Windows, including instrumentation descendants; killing the IPC/TCP connection also stops standalone workers. Embedded VS Code workers leave process lifetime to their host.
+
+Discovery and debugging use native Node IPC; test runs use an encrypted loopback connection under NYC. `NYC_PATH` selects the NYC executable or Node `.js` entrypoint (use the `.js` entrypoint on Windows), `NYC_REPORTER` defaults to `lcov`, and `NYC_PORT` defaults to 8123. The launcher drains worker messages and waits for the coverage process to finish before exiting.
 
 ## VS Code integration tests
 
@@ -90,3 +92,7 @@ MOCHA_EXTENSION_ROOT=/absolute/path/vscode-mocha-test-adapter MOCHA_TEST_DOCKER=
 ```
 
 SSH integration tests execute the generated remote command and stdin bootstrap locally using simulated SSH/rsync executables. They do not verify authentication, host keys or forwarding on a deployed remote server. VS Code launcher tests mock its downloader/API and verify the environment handoff; a full graphical VS Code launch needs a display.
+
+## Required CI
+
+The `CI gate` check is required before merging into `master`. Node 22.12, 24 and 26 are tested on Linux, Windows and macOS against a built checkout of the hardened extension. Linux additionally runs real Node 24 container tests; Windows skips POSIX SSH shell simulations. All platforms exercise NYC keepalive and cancellation, including a grandchild that ignores SIGTERM. Dependency audit and tarball packaging are also required. `npm run test:integration` fails if `MOCHA_EXTENSION_ROOT` is missing, preventing a green integration job that accidentally skipped every worker regression. The matching extension fork has its own required gate and launcher integration job.

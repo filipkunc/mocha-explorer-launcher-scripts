@@ -10,7 +10,7 @@ test('rejects malformed ports, launcher arguments and SSH destinations', () => {
  for (const value of ['-oProxyCommand=bad', 'host;touch file', 'user@host', 'host with spaces']) assert.throws(() => sshDestination(value));
  assert.equal(sshDestination('example.org', 'runner'), 'runner@example.org');
 });
-test('quotes shell metacharacters as literal remote command arguments', () => {
+test('quotes shell metacharacters as literal remote command arguments', { skip: process.platform === 'win32' }, () => {
  for (const value of ["a'b", 'workspace with spaces', '$(printf injected)', '`printf injected`', '; printf injected', 'line\nnext']) {
   const result = execFileSync('/bin/sh', ['-c', 'printf %s ' + quote(value)], { encoding: 'utf8' });
   assert.equal(result, value);

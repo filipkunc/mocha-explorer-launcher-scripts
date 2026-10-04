@@ -5,6 +5,7 @@ import { secureTransport, port, stringArray, mapPath, supervise, bridge, fail, c
 
 process.once('message', async (original: any) => {
 	let child;
+	let stop: (() => Promise<void>) | undefined;
 	try {
 		const { transport, key } = secureTransport();
 		const image = process.env.DOCKER_IMAGE || 'node:24-bookworm-slim';
@@ -27,12 +28,12 @@ process.once('message', async (original: any) => {
 			...stringArray(process.env.DOCKER_EXTRA_ARGS), image, 'node',
 			...(debugPort ? [`--inspect-brk=0.0.0.0:${debugPort}`] : []), worker,
 			JSON.stringify({ role: 'server', port: workerPort, host: '0.0.0.0' })
-		], { stdio: 'inherit' });
-		supervise(child);
+		], { stdio: 'inherit', detached: process.platform !== 'win32' });
+		stop = supervise(child, true);
 		const socket = await containerConnection(transport, workerPort, key);
-		await bridge(socket, args, transport, child, (message: any) => {
+		await bridge(socket, args, transport, child, stop, (message: any) => {
 			const convert = (value: string) => mapPath(value, remote, local);
 			return args.action === 'loadTests' ? mochaWorker.convertTestLoadMessage(message, convert) : mochaWorker.convertTestRunMessage(message, convert);
 		});
-	} catch { child?.kill(); fail(); }
+	} catch { if (stop) await stop(); else child?.kill(); fail(); }
 });
